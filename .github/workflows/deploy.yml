@@ -1,0 +1,58 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run tests
+      run: npm test --if-present
+
+    - name: Deploy to server
+      env:
+        SERVER_HOST: 64.23.201.2
+        SERVER_USER: root
+        SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+      run: |
+        # Install sshpass
+        sudo apt-get update
+        sudo apt-get install -y sshpass
+
+        # Deploy files to server
+        sshpass -p "$SERVER_PASSWORD" scp -o StrictHostKeyChecking=no -r \
+          app \
+          lib \
+          prisma \
+          public \
+          package.json \
+          package-lock.json \
+          next.config.ts \
+          tsconfig.json \
+          tailwind.config.ts \
+          postcss.config.mjs \
+          $SERVER_USER@$SERVER_HOST:/var/www/guaira/
+
+        # Install dependencies and restart on server
+        sshpass -p "$SERVER_PASSWORD" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_HOST << 'ENDSSH'
+          cd /var/www/guaira
+          npm install --production
+          npx prisma generate
+          pm2 restart guaira-app
+ENDSSH
