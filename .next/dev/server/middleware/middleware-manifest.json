@@ -1,0 +1,51 @@
+{
+  "sorted_middleware": [],
+  "middleware": {
+    "/": {
+      "files": [
+        "server/edge/chunks/_f82abe99._.js",
+        "server/edge/chunks/[root-of-the-server]__f2b15f93._.js",
+        "server/edge/chunks/turbopack-edge-wrapper_dca2d978.js"
+      ],
+      "name": "middleware",
+      "page": "/",
+      "matchers": [
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/dashboard/:path*{(\\\\.json)}?",
+          "originalSource": "/dashboard/:path*"
+        },
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/wallet/:path*{(\\\\.json)}?",
+          "originalSource": "/wallet/:path*"
+        },
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/pos/:path*{(\\\\.json)}?",
+          "originalSource": "/pos/:path*"
+        },
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/payments/:path*{(\\\\.json)}?",
+          "originalSource": "/payments/:path*"
+        },
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/transactions/:path*{(\\\\.json)}?",
+          "originalSource": "/transactions/:path*"
+        },
+        {
+          "regexp": "/:nextData(_next/data/[^/]{1,})?/admin/:path*{(\\\\.json)}?",
+          "originalSource": "/admin/:path*"
+        }
+      ],
+      "wasm": [],
+      "assets": [],
+      "env": {
+        "__NEXT_BUILD_ID": "development",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "TlBy90hX1SVXC/NI+qin1pheNggVi0m0Nit1oVGrptY=",
+        "__NEXT_PREVIEW_MODE_ID": "aecdbc7248afed3557c13b5b44aff01b",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "b8c0c6a120e1d093add670983cce62dd96bd50717c1ae1878d6e3265ec339e7c",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "0735d161445b8216c7d3815d353137574ed5e7d68880d3e7f6370657d1ec4303"
+      }
+    }
+  },
+  "instrumentation": null,
+  "functions": {}
+}

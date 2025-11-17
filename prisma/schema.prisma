@@ -1,0 +1,315 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// CORE MODELS - User & Authentication
+// ============================================================================
+
+model User {
+  id            String    @id @default(uuid())
+  phone         String    @unique
+  password      String
+  name          String
+  email         String?   @unique
+  emailVerified DateTime?
+  role          String    @default("customer") // customer, merchant, admin
+  avatar        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relaciones
+  wallet          Wallet?
+  transactions    Transaction[]
+  payments        Payment[]
+  accounts        Account[]
+  sessions        Session[]
+  otpCodes        OtpCode[]
+  paymentMethods  PaymentMethod[]
+  auditLogs       AuditLog[]
+  ledgerEntries   LedgerEntry[]
+
+  @@map("users")
+}
+
+// ============================================================================
+// OTP & VERIFICATION MODELS
+// ============================================================================
+
+model OtpCode {
+  id         String   @id @default(uuid())
+  userId     String?  // Opcional - puede ser para email no registrado
+  email      String
+  code       String   // Hash del código OTP
+  purpose    String   @default("login") // login, password_reset, email_verification
+  expiresAt  DateTime
+  attempts   Int      @default(0)
+  verified   Boolean  @default(false)
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, code])
+  @@index([email, verified, expiresAt])
+  @@map("otp_codes")
+}
+
+// ============================================================================
+// WALLET & TRANSACTION MODELS
+// ============================================================================
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  balance   Float    @default(0)
+  currency  String   @default("USD")
+  status    String   @default("active") // active, suspended, closed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relaciones
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([status])
+  @@map("wallets")
+}
+
+model Transaction {
+  id              String   @id @default(uuid())
+  userId          String
+  walletId        String
+  type            String   // deposit, payment, withdrawal, transfer, refund
+  amount          Float
+  currency        String   @default("USD")
+  status          String   @default("pending") // pending, processing, succeeded, failed, cancelled
+  description     String?
+  metadata        Json?
+  idempotencyKey  String   @unique // Para prevenir duplicados
+  failureReason   String?
+  sourceId        String?  // ID del payment method, transfer, etc.
+  destinationId   String?  // ID del destinatario en caso de transfer
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relaciones
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet        Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  ledgerEntries LedgerEntry[]
+
+  @@index([userId])
+  @@index([walletId])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+  @@index([idempotencyKey])
+  @@map("transactions")
+}
+
+// ============================================================================
+// DOUBLE-ENTRY ACCOUNTING - Ledger
+// ============================================================================
+
+model LedgerEntry {
+  id            String   @id @default(uuid())
+  transactionId String
+  userId        String
+  walletId      String
+  accountType   String   // asset, liability, equity, revenue, expense
+  debit         Float    @default(0) // DR - Débito
+  credit        Float    @default(0) // CR - Crédito
+  balance       Float    // Balance después de esta entrada
+  currency      String   @default("USD")
+  description   String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  // Relaciones
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet      Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([userId])
+  @@index([walletId])
+  @@index([createdAt])
+  @@map("ledger_entries")
+}
+
+// ============================================================================
+// PAYMENT MODELS
+// ============================================================================
+
+model Payment {
+  id          String   @id @default(uuid())
+  userId      String
+  merchantId  String
+  amount      Float
+  currency    String   @default("USD")
+  status      String   @default("succeeded") // pending, succeeded, failed, refunded
+  description String?
+  items       Json?    // Array of items purchased
+  provider    String?  // stripe, paypal, wallet
+  providerId  String?  // Payment intent ID, order ID, etc.
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relaciones
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refunds Refund[]
+
+  @@index([userId])
+  @@index([merchantId])
+  @@index([status])
+  @@index([provider])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+model PaymentMethod {
+  id                String   @id @default(uuid())
+  userId            String
+  provider          String   // stripe, paypal
+  providerId        String   // Payment method ID del proveedor
+  type              String   // card, bank_account, paypal_account
+  last4             String?  // Últimos 4 dígitos (para tarjetas)
+  brand             String?  // visa, mastercard, etc.
+  expiryMonth       Int?
+  expiryYear        Int?
+  isDefault         Boolean  @default(false)
+  billingDetails    Json?
+  metadata          Json?
+  status            String   @default("active") // active, expired, revoked
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relaciones
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([provider])
+  @@index([status])
+  @@unique([userId, providerId])
+  @@map("payment_methods")
+}
+
+model Refund {
+  id              String   @id @default(uuid())
+  paymentId       String
+  amount          Float
+  currency        String   @default("USD")
+  status          String   @default("pending") // pending, succeeded, failed
+  reason          String   // duplicate, fraudulent, requested_by_customer, other
+  description     String?
+  provider        String?  // stripe, paypal
+  providerId      String?  // Refund ID del proveedor
+  metadata        Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relaciones
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("refunds")
+}
+
+// ============================================================================
+// AUDIT & SECURITY MODELS
+// ============================================================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String   // create, update, delete, login, logout, etc.
+  resource   String   // user, wallet, transaction, payment, etc.
+  resourceId String?
+  changes    Json?    // Cambios realizados
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  // Relaciones
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model RateLimitLog {
+  id         String   @id @default(uuid())
+  identifier String   // IP, userId, email, etc.
+  action     String   // otp_generation, login_attempt, api_call, etc.
+  count      Int      @default(1)
+  windowStart DateTime
+  windowEnd  DateTime
+  blocked    Boolean  @default(false)
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([identifier, action, windowEnd])
+  @@index([blocked])
+  @@map("rate_limit_logs")
+}
+
+// ============================================================================
+// NEXTAUTH MODELS
+// ============================================================================
+
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}

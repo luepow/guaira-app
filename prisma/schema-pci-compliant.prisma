@@ -1,0 +1,944 @@
+// ============================================================================
+// GUAIR.APP - PCI-DSS COMPLIANT DATABASE SCHEMA
+// ============================================================================
+// Version: 2.0
+// Database: PostgreSQL 16+
+// ORM: Prisma 5+
+// Compliance: PCI-DSS Level 1, GDPR, CCPA
+// Architecture: Double-Entry Accounting, CQRS, Event Sourcing
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "views"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// CORE ENTITIES - USUARIOS Y AUTENTICACIÓN
+// ============================================================================
+
+// Usuarios del sistema con seguridad PCI-DSS 8.2
+model User {
+  id               String    @id @default(uuid())
+
+  // Identificación y contacto
+  phone            String    @unique
+  phoneVerified    DateTime?
+  email            String?   @unique
+  emailVerified    DateTime?
+
+  // Perfil
+  name             String
+  avatar           String?
+  role             UserRole  @default(CUSTOMER)
+
+  // Seguridad - PCI-DSS 8.2.4 (Control de Acceso)
+  passwordHash     String    // bcrypt hash, nunca almacenar en texto plano
+  passwordChangedAt DateTime @default(now())
+  failedLoginAttempts Int    @default(0)
+  accountLocked    Boolean   @default(false)
+  accountLockedUntil DateTime?
+  lastLogin        DateTime?
+  lastFailedLogin  DateTime?
+
+  // Multi-Factor Authentication (2FA/OTP) - PCI-DSS 8.3
+  mfaEnabled       Boolean   @default(false)
+  mfaSecret        String?   // Encrypted TOTP secret (AES-256-GCM)
+  mfaBackupCodes   String[]  // Array de códigos de respaldo hasheados
+
+  // KYC (Know Your Customer) - Ligero
+  kycStatus        KYCStatus @default(PENDING)
+  kycLevel         Int       @default(0) // 0=none, 1=basic, 2=full
+  kycVerifiedAt    DateTime?
+  kycDocuments     Json?     // Referencias a documentos en storage seguro
+
+  // Compliance y Legal
+  termsAcceptedAt  DateTime?
+  termsVersion     String?
+  privacyAcceptedAt DateTime?
+  privacyVersion   String?
+
+  // Geolocalización y dispositivos
+  lastIpAddress    String?
+  lastUserAgent    String?
+  trustedDevices   Json?     // Array de device fingerprints
+
+  // Audit timestamps - PCI-DSS 10.3.5
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime? // Soft delete para compliance
+
+  // Relaciones
+  wallets          Wallet[]
+  ledgerEntries    LedgerEntry[]
+  transactions     Transaction[]
+  payments         Payment[]
+  paymentMethods   PaymentMethod[]
+  otpCodes         OTPCode[]
+  sessions         Session[]
+  accounts         Account[]
+  auditLogs        AuditLog[]
+  securityEvents   SecurityEvent[]
+  apiKeys          ApiKey[]
+  notifications    Notification[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([role])
+  @@index([kycStatus])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// Enum para roles de usuario
+enum UserRole {
+  CUSTOMER   // Cliente/consumidor
+  MERCHANT   // Comerciante/vendedor
+  ADMIN      // Administrador del sistema
+  OPERATOR   // Operador de soporte
+  AUDITOR    // Auditor (solo lectura)
+}
+
+// Enum para status KYC
+enum KYCStatus {
+  PENDING    // Pendiente
+  IN_REVIEW  // En revisión
+  APPROVED   // Aprobado
+  REJECTED   // Rechazado
+  EXPIRED    // Expirado
+}
+
+// ============================================================================
+// WALLETS Y BALANCE - CORE FINANCIERO
+// ============================================================================
+
+// Billeteras digitales con encriptación - PCI-DSS 3.4
+model Wallet {
+  id               String   @id @default(uuid())
+  userId           String
+
+  // Identificación de wallet
+  walletNumber     String   @unique // Número único público de wallet
+  type             WalletType @default(PERSONAL)
+
+  // Balance (hot cache, sync con ledger)
+  balance          Decimal  @default(0) @db.Decimal(19, 4)
+  availableBalance Decimal  @default(0) @db.Decimal(19, 4)
+  holdBalance      Decimal  @default(0) @db.Decimal(19, 4) // Fondos en hold
+
+  // Multi-currency support
+  currency         String   @default("USD")
+
+  // Estado y límites
+  status           WalletStatus @default(ACTIVE)
+  dailyLimit       Decimal?  @db.Decimal(19, 4)
+  monthlyLimit     Decimal?  @db.Decimal(19, 4)
+
+  // Encriptación de datos sensibles - PCI-DSS 3.4
+  encryptedData    String?  @db.Text // JSON encriptado con datos sensibles
+  encryptionKeyId  String?  // ID de la key en vault (HashiCorp Vault)
+  encryptionIV     String?  // Initialization Vector para AES-GCM
+
+  // Compliance
+  freezeReason     String?
+  freezedAt        DateTime?
+  closedAt         DateTime?
+
+  // Audit timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  lastTransactionAt DateTime?
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries    LedgerEntry[]
+  transactions     Transaction[]
+  paymentMethodsSource PaymentMethod[] @relation("WalletAsSource")
+
+  @@index([userId])
+  @@index([walletNumber])
+  @@index([status])
+  @@index([currency])
+  @@index([createdAt])
+  @@map("wallets")
+}
+
+enum WalletType {
+  PERSONAL   // Wallet personal
+  BUSINESS   // Wallet de negocio
+  MERCHANT   // Wallet de comerciante
+  ESCROW     // Wallet de garantía
+}
+
+enum WalletStatus {
+  ACTIVE     // Activa
+  SUSPENDED  // Suspendida temporalmente
+  FROZEN     // Congelada por seguridad
+  CLOSED     // Cerrada permanentemente
+}
+
+// ============================================================================
+// TRANSACTIONS - TRANSACCIONES
+// ============================================================================
+
+model Transaction {
+  id               String   @id @default(uuid())
+  userId           String
+  walletId         String
+
+  // Tipo de transacción
+  type             TransactionType
+
+  // Montos
+  amount           Decimal  @db.Decimal(19, 4)
+  currency         String   @default("USD")
+
+  // Estado
+  status           TransactionStatus @default(PENDING)
+
+  // Descripción y metadata
+  description      String?
+  metadata         Json?
+
+  // Referencias
+  sourceId         String?  // ID del payment method, transfer, etc.
+  destinationId    String?  // ID del destinatario en caso de transfer
+
+  // Idempotencia - PCI-DSS prevención de duplicados
+  idempotencyKey   String   @unique // UUID del cliente para idempotencia
+
+  // Razón de fallo
+  failureReason    String?
+
+  // Seguridad y auditoría - PCI-DSS 10.3
+  ipAddress        String?
+  userAgent        String?
+  geoLocation      String?
+
+  // Integridad - PCI-DSS 10.5.2 (Inmutabilidad)
+  hash             String   // SHA-256 del contenido
+  signature        String   // HMAC-SHA256 signature
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet           Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  ledgerEntries    LedgerEntry[]
+
+  @@index([userId])
+  @@index([walletId])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+  @@index([idempotencyKey])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  DEPOSIT           // Depósito/recarga
+  WITHDRAWAL        // Retiro
+  PAYMENT           // Pago a comerciante
+  TRANSFER          // Transferencia entre wallets
+  REFUND            // Reembolso
+  FEE               // Comisión
+  REVERSAL          // Reversión de transacción
+  ADJUSTMENT        // Ajuste manual (requiere aprobación)
+  CASHBACK          // Cashback/recompensa
+  SETTLEMENT        // Liquidación a comerciante
+}
+
+enum TransactionStatus {
+  PENDING       // Pendiente
+  PROCESSING    // Procesando
+  SUCCEEDED     // Exitoso
+  FAILED        // Fallido
+  CANCELLED     // Cancelado
+}
+
+// ============================================================================
+// DOUBLE-ENTRY ACCOUNTING - LIBRO MAYOR
+// ============================================================================
+
+// Entradas del libro mayor con doble partida - PCI-DSS 10
+// Cada transacción genera 2 entradas: DR (débito) y CR (crédito)
+// Invariante: SUM(DR) = SUM(CR) para cada ledgerRef
+model LedgerEntry {
+  id               String   @id @default(uuid())
+
+  // Referencia de transacción (agrupa DR + CR)
+  ledgerRef        String   // UUID compartido entre débito y crédito
+  sequenceNumber   BigInt   @default(autoincrement()) // Número secuencial incremental
+
+  // Tipo de entrada (Débito o Crédito)
+  entryType        EntryType
+
+  // Referencia a wallet (una de las dos será null según sea merchant)
+  userId           String?
+  walletId         String?
+  transactionId    String?
+
+  // Merchant ID si aplica (para pagos a comerciantes)
+  merchantId       String?
+
+  // Tipo de cuenta contable
+  accountType      AccountType
+
+  // Montos
+  debit            Decimal  @default(0) @db.Decimal(19, 4)
+  credit           Decimal  @default(0) @db.Decimal(19, 4)
+  currency         String   @default("USD")
+
+  // Balance después de la transacción (snapshot)
+  balanceAfter     Decimal  @db.Decimal(19, 4)
+
+  // Descripción y metadata
+  description      String?
+  metadata         Json?
+
+  // Idempotencia - PCI-DSS prevención de duplicados
+  requestId        String   @unique // UUID del cliente para idempotencia
+
+  // Seguridad y auditoría - PCI-DSS 10.3
+  ipAddress        String?
+  userAgent        String?
+  geoLocation      String?
+
+  // Integridad - PCI-DSS 10.5.2 (Inmutabilidad)
+  hash             String   // SHA-256 del contenido
+  signature        String   // HMAC-SHA256 signature
+  previousHash     String?  // Hash de la entrada anterior (blockchain-like)
+
+  // Status para reconciliación
+  reconciledAt     DateTime?
+  reconciliationId String?
+
+  // Relación con pago si aplica
+  paymentId        String?
+
+  // Timestamps (inmutable, no tiene updatedAt)
+  createdAt        DateTime @default(now())
+
+  // Relaciones
+  user             User?    @relation(fields: [userId], references: [id])
+  wallet           Wallet?  @relation(fields: [walletId], references: [id])
+  transaction      Transaction? @relation(fields: [transactionId], references: [id])
+  payment          Payment? @relation(fields: [paymentId], references: [id])
+
+  @@index([ledgerRef])
+  @@index([userId])
+  @@index([walletId])
+  @@index([merchantId])
+  @@index([entryType])
+  @@index([accountType])
+  @@index([createdAt])
+  @@index([sequenceNumber])
+  @@index([paymentId])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+enum EntryType {
+  DR  // Débito (salida de fondos)
+  CR  // Crédito (entrada de fondos)
+}
+
+enum AccountType {
+  ASSET      // Activos (wallets de usuarios)
+  LIABILITY  // Pasivos (fondos en hold)
+  EQUITY     // Capital
+  REVENUE    // Ingresos (fees, comisiones)
+  EXPENSE    // Gastos (costos operativos)
+}
+
+// ============================================================================
+// PAYMENTS - PAGOS Y TRANSACCIONES
+// ============================================================================
+
+// Pagos realizados por usuarios
+model Payment {
+  id               String   @id @default(uuid())
+
+  // Referencias
+  userId           String
+  merchantId       String   // ID del comerciante
+
+  // Monto
+  amount           Decimal  @db.Decimal(19, 4)
+  currency         String   @default("USD")
+
+  // Comisiones
+  feeAmount        Decimal  @default(0) @db.Decimal(19, 4)
+  merchantAmount   Decimal  @db.Decimal(19, 4) // Monto que recibe el merchant
+
+  // Estado
+  status           PaymentStatus @default(PENDING)
+
+  // Descripción y metadata
+  description      String?
+  items            Json?    // Array de productos/servicios
+
+  // Método de pago utilizado
+  paymentMethodId  String?
+
+  // Provider de pago
+  provider         String?  // stripe, paypal, wallet
+  providerId       String?  // Payment intent ID, order ID, etc.
+
+  // Referencias externas
+  externalRef      String?  // Referencia de sistema externo
+  merchantOrderId  String?  // ID de orden del comerciante
+
+  // Idempotencia
+  idempotencyKey   String   @unique
+
+  // Seguridad y auditoría
+  ipAddress        String?
+  userAgent        String?
+  geoLocation      String?
+
+  // PCI-DSS - Nunca almacenar PAN completo
+  // Solo últimos 4 dígitos para display
+  cardLast4        String?
+  cardBrand        String?  // visa, mastercard, etc.
+
+  // Integridad
+  hash             String
+  signature        String
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  completedAt      DateTime?
+  failedAt         DateTime?
+  refundedAt       DateTime?
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id])
+  paymentMethod    PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+  ledgerEntries    LedgerEntry[]
+  refunds          Refund[]
+
+  @@index([userId])
+  @@index([merchantId])
+  @@index([status])
+  @@index([provider])
+  @@index([createdAt])
+  @@index([paymentMethodId])
+  @@map("payments")
+}
+
+enum PaymentStatus {
+  PENDING       // Pendiente
+  PROCESSING    // Procesando
+  AUTHORIZED    // Autorizado
+  SUCCEEDED     // Exitoso
+  FAILED        // Fallido
+  REFUNDED      // Reembolsado
+  PARTIALLY_REFUNDED // Reembolso parcial
+  CANCELLED     // Cancelado
+  EXPIRED       // Expirado
+}
+
+// ============================================================================
+// PAYMENT METHODS - MÉTODOS DE PAGO
+// ============================================================================
+
+// Métodos de pago tokenizados - PCI-DSS 3.2
+model PaymentMethod {
+  id               String   @id @default(uuid())
+  userId           String
+
+  // Tipo de método de pago
+  type             PaymentMethodType
+
+  // Wallet como fuente (para pagos wallet-to-wallet)
+  sourceWalletId   String?
+
+  // Provider de pago
+  provider         String   // stripe, paypal, mercadopago, etc
+
+  // Tokenización - PCI-DSS 3.2 (nunca almacenar PAN)
+  providerId       String   // Token del provider (Stripe, etc)
+
+  // Datos de display (no sensibles)
+  last4            String?  // Últimos 4 dígitos
+  brand            String?  // visa, mastercard, etc
+  expiryMonth      Int?
+  expiryYear       Int?
+
+  // Billing details
+  billingDetails   Json?    // Nombre, dirección, etc
+
+  // Estado
+  isDefault        Boolean  @default(false)
+  status           PaymentMethodStatus @default(ACTIVE)
+
+  // Metadata
+  metadata         Json?
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  lastUsedAt       DateTime?
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceWallet     Wallet?  @relation("WalletAsSource", fields: [sourceWalletId], references: [id])
+  payments         Payment[]
+
+  @@unique([userId, providerId])
+  @@index([userId])
+  @@index([type])
+  @@index([provider])
+  @@index([status])
+  @@map("payment_methods")
+}
+
+enum PaymentMethodType {
+  WALLET        // Wallet interna
+  CARD          // Tarjeta de crédito/débito
+  BANK_TRANSFER // Transferencia bancaria
+  CASH          // Efectivo
+  QR_CODE       // Código QR
+  NFC           // Pago contactless
+  PAYPAL        // PayPal account
+}
+
+enum PaymentMethodStatus {
+  ACTIVE        // Activo
+  INACTIVE      // Inactivo
+  EXPIRED       // Expirado
+  REVOKED       // Revocado
+}
+
+// ============================================================================
+// REFUNDS - REEMBOLSOS
+// ============================================================================
+
+model Refund {
+  id               String   @id @default(uuid())
+  paymentId        String
+
+  // Monto
+  amount           Decimal  @db.Decimal(19, 4)
+  currency         String   @default("USD")
+
+  // Razón
+  reason           RefundReason
+  description      String?
+
+  // Estado
+  status           RefundStatus @default(PENDING)
+
+  // Provider
+  provider         String?  // stripe, paypal
+  providerId       String?  // Refund ID del proveedor
+
+  // Metadata
+  metadata         Json?
+
+  // Audit
+  processedBy      String?  // Admin/operator ID
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  completedAt      DateTime?
+
+  // Relaciones
+  payment          Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("refunds")
+}
+
+enum RefundReason {
+  CUSTOMER_REQUEST
+  DUPLICATE
+  FRAUDULENT
+  REQUESTED_BY_CUSTOMER
+  OTHER
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+// ============================================================================
+// OTP Y 2FA - AUTENTICACIÓN DE DOS FACTORES
+// ============================================================================
+
+// Códigos OTP para verificación - PCI-DSS 8.3
+model OTPCode {
+  id               String   @id @default(uuid())
+  userId           String?  // Puede ser null para OTP de registro
+
+  // Identificador (phone o email)
+  email            String   // email@example.com o phone
+  identifierType   OTPType  @default(EMAIL)
+
+  // Código OTP (hasheado)
+  code             String   // bcrypt hash del código
+
+  // Propósito
+  purpose          OTPPurpose @default(LOGIN)
+
+  // Estado
+  verified         Boolean  @default(false)
+  attempts         Int      @default(0)
+
+  // Expiración
+  expiresAt        DateTime
+  verifiedAt       DateTime?
+
+  // Seguridad
+  ipAddress        String?
+  userAgent        String?
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+
+  // Relaciones
+  user             User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, code])
+  @@index([email, verified, expiresAt])
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([verified])
+  @@map("otp_codes")
+}
+
+enum OTPType {
+  PHONE
+  EMAIL
+}
+
+enum OTPPurpose {
+  LOGIN                // Login
+  PASSWORD_RESET       // Reseteo de contraseña
+  EMAIL_VERIFICATION   // Verificación de email
+  REGISTRATION         // Registro de nuevo usuario
+  TRANSACTION          // Confirmar transacción
+  WITHDRAWAL           // Confirmar retiro
+  SETTINGS_CHANGE      // Cambio de configuración sensible
+}
+
+// ============================================================================
+// AUDIT Y COMPLIANCE - PCI-DSS REQUIREMENT 10
+// ============================================================================
+
+// Logs de auditoría inmutables - PCI-DSS 10
+model AuditLog {
+  id               String   @id @default(uuid())
+
+  // Who - PCI-DSS 10.3.1
+  userId           String?
+  userName         String?
+
+  // What - PCI-DSS 10.3.2-10.3.4
+  action           AuditAction
+  resource         String?  // user, wallet, payment, etc
+  resourceId       String?
+
+  // How - Detalles de la acción
+  changes          Json?    // Antes y después (sin datos sensibles)
+
+  // When - PCI-DSS 10.3.5
+  createdAt        DateTime @default(now())
+
+  // Where - PCI-DSS 10.3.6
+  ipAddress        String?
+  userAgent        String?
+
+  // Result - PCI-DSS 10.3.3
+  result           AuditResult @default(SUCCESS)
+
+  // Context adicional
+  metadata         Json?
+
+  // Integridad - PCI-DSS 10.5.2 (Inmutabilidad)
+  hash             String   // SHA-256 del contenido
+  signature        String   // HMAC signature
+
+  // Relaciones
+  user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+  @@index([result])
+  @@map("audit_logs")
+}
+
+enum AuditAction {
+  // Autenticación
+  USER_LOGIN
+  USER_LOGOUT
+  USER_LOGIN_FAILED
+  PASSWORD_CHANGED
+  MFA_ENABLED
+  MFA_DISABLED
+
+  // CRUD Operations
+  CREATE
+  UPDATE
+  DELETE
+  READ
+
+  // Transacciones financieras
+  PAYMENT_CREATED
+  PAYMENT_COMPLETED
+  PAYMENT_FAILED
+  DEPOSIT_CREATED
+  WITHDRAWAL_CREATED
+  TRANSFER_CREATED
+  REFUND_CREATED
+
+  // Seguridad
+  SECURITY_EVENT
+  API_KEY_CREATED
+  API_KEY_REVOKED
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+}
+
+// ============================================================================
+// SECURITY EVENTS - EVENTOS DE SEGURIDAD
+// ============================================================================
+
+// Eventos de seguridad para monitoreo - PCI-DSS 11
+model SecurityEvent {
+  id               String   @id @default(uuid())
+
+  // Tipo y severidad
+  type             SecurityEventType
+  severity         SecuritySeverity
+
+  // Contexto
+  userId           String?
+  ipAddress        String?
+  userAgent        String?
+
+  // Detalles
+  description      String   @db.Text
+  details          Json?
+
+  // Estado
+  resolved         Boolean  @default(false)
+  resolvedAt       DateTime?
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relaciones
+  user             User?    @relation(fields: [userId], references: [id])
+
+  @@index([type])
+  @@index([severity])
+  @@index([resolved])
+  @@index([userId])
+  @@index([ipAddress])
+  @@index([createdAt])
+  @@map("security_events")
+}
+
+enum SecurityEventType {
+  BRUTE_FORCE_ATTEMPT
+  SUSPICIOUS_LOGIN
+  MULTIPLE_FAILED_LOGINS
+  FRAUDULENT_TRANSACTION
+  UNUSUAL_ACTIVITY
+  RATE_LIMIT_EXCEEDED
+}
+
+enum SecuritySeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// ============================================================================
+// RATE LIMITING - CONTROL DE TASA
+// ============================================================================
+
+model RateLimitLog {
+  id               String   @id @default(uuid())
+  identifier       String   // IP, userId, email, etc.
+  action           String   // otp_generation, login_attempt, api_call, etc.
+  count            Int      @default(1)
+  windowStart      DateTime
+  windowEnd        DateTime
+  blocked          Boolean  @default(false)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+
+  @@index([identifier, action, windowEnd])
+  @@index([blocked])
+  @@map("rate_limit_logs")
+}
+
+// ============================================================================
+// API KEYS - INTEGRACIÓN DE MERCHANTS
+// ============================================================================
+
+// API Keys para integración de comerciantes
+model ApiKey {
+  id               String   @id @default(uuid())
+  userId           String
+
+  // Identificación
+  name             String
+  description      String?
+
+  // Key hasheada (nunca almacenar plaintext)
+  keyHash          String   @unique
+  keyPrefix        String   // Primeros caracteres para identificación
+
+  // Permisos
+  scopes           String[] // Array de permisos
+
+  // Límites
+  rateLimit        Int      @default(1000) // Requests por hora
+
+  // Estado
+  isActive         Boolean  @default(true)
+
+  // Uso
+  lastUsedAt       DateTime?
+  lastUsedIp       String?
+
+  // Expiración
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([keyHash])
+  @@index([isActive])
+  @@index([expiresAt])
+  @@map("api_keys")
+}
+
+// ============================================================================
+// NOTIFICATIONS - NOTIFICACIONES
+// ============================================================================
+
+// Notificaciones a usuarios
+model Notification {
+  id               String   @id @default(uuid())
+  userId           String
+
+  // Contenido
+  type             NotificationType
+  title            String
+  message          String   @db.Text
+
+  // Metadata
+  data             Json?    // Datos adicionales
+
+  // Estado
+  read             Boolean  @default(false)
+  readAt           DateTime?
+
+  // Timestamps
+  createdAt        DateTime @default(now())
+
+  // Relaciones
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  PAYMENT_RECEIVED
+  PAYMENT_SENT
+  DEPOSIT_CONFIRMED
+  WITHDRAWAL_COMPLETED
+  REFUND_PROCESSED
+  SECURITY_ALERT
+  ACCOUNT_LOCKED
+  PASSWORD_CHANGED
+  NEW_DEVICE_LOGIN
+}
+
+// ============================================================================
+// NEXTAUTH MODELS - AUTENTICACIÓN CON NEXTAUTH
+// ============================================================================
+
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id               String   @id @default(uuid())
+  sessionToken     String   @unique
+  userId           String
+  expires          DateTime
+
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier       String
+  token            String   @unique
+  expires          DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================================================
+// FIN DEL SCHEMA
+// ============================================================================

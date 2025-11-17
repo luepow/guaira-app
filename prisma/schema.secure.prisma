@@ -1,0 +1,291 @@
+// Secure Prisma Schema - PCI-DSS Compliant
+// This is your updated Prisma schema file with security enhancements
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  phone         String    @unique
+  passwordHash  String    // Changed from 'password' - bcrypt hash
+  name          String
+  email         String?   @unique
+  emailVerified DateTime?
+  role          String    @default("customer") // customer, merchant, admin
+  avatar        String?
+
+  // Security fields - PCI-DSS 8.2.4
+  failedLoginAttempts Int       @default(0)
+  accountLocked       Boolean   @default(false)
+  lastLogin           DateTime?
+  lastFailedLogin     DateTime?
+  passwordChangedAt   DateTime  @default(now())
+  mfaEnabled          Boolean   @default(false)
+  mfaSecret           String?   // Encrypted TOTP secret
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  wallet       Wallet?
+  transactions Transaction[]
+  payments     Payment[]
+  accounts     Account[]
+  sessions     Session[]
+
+  @@index([phone])
+  @@index([email])
+  @@map("users")
+}
+
+model Wallet {
+  id       String @id @default(uuid())
+  userId   String @unique
+
+  // Encrypted balance - PCI-DSS 3.4
+  balance         Float   @default(0)
+  encryptedData   String? // Contains encrypted sensitive data
+  encryptionIV    String? // Initialization vector for AES
+  encryptionTag   String? // Authentication tag for GCM
+
+  currency String @default("USD")
+  status   String @default("active") // active, suspended, closed
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId])
+  @@index([status])
+  @@map("wallets")
+}
+
+model Transaction {
+  id       String @id @default(uuid())
+  userId   String
+  walletId String
+
+  // Transaction details
+  type        String // deposit, payment, withdrawal, transfer
+  amount      Float
+  currency    String @default("USD")
+  status      String @default("pending") // pending, processing, succeeded, failed
+  description String?
+
+  // Security and audit - PCI-DSS 10
+  metadata      Json?
+  ipAddress     String?
+  userAgent     String?
+
+  // Immutability - PCI-DSS 10.5.2
+  hash          String  // SHA-256 hash of transaction data
+  signature     String  // HMAC signature for integrity
+
+  // Idempotency
+  requestId     String? @unique // Prevents duplicate transactions
+
+  // Timestamps - PCI-DSS 10.3.5
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([walletId])
+  @@index([createdAt])
+  @@index([status])
+  @@index([type])
+  @@map("transactions")
+}
+
+model Payment {
+  id         String @id @default(uuid())
+  userId     String
+  merchantId String
+
+  // Payment details
+  amount      Float
+  currency    String @default("USD")
+  status      String @default("pending") // pending, succeeded, failed, refunded
+  description String?
+  items       Json?
+
+  // Security and audit
+  ipAddress   String?
+  userAgent   String?
+  hash        String  // Transaction integrity hash
+  signature   String  // HMAC signature
+  requestId   String? @unique // Idempotency key
+
+  // PCI-DSS compliance
+  // Note: Never store full PAN (Primary Account Number)
+  // Only store last 4 digits if needed for display
+  last4Digits String? // Last 4 digits of card (if applicable)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([merchantId])
+  @@index([createdAt])
+  @@index([status])
+  @@map("payments")
+}
+
+// Audit Log - PCI-DSS Requirement 10
+model AuditLog {
+  id String @id @default(uuid())
+
+  // Who - PCI-DSS 10.3.1
+  userId   String?
+  userName String?
+
+  // What - PCI-DSS 10.3.2-10.3.4
+  action       String // See AuditAction type in audit.ts
+  resourceType String?
+  resourceId   String?
+
+  // When - PCI-DSS 10.3.5
+  timestamp DateTime @default(now())
+
+  // Where - PCI-DSS 10.3.6
+  ipAddress String?
+  userAgent String?
+  location  String?
+
+  // Result - PCI-DSS 10.3.3
+  result String // SUCCESS or FAILURE
+  reason String?
+
+  // Additional context
+  metadata  Json?
+  sessionId String?
+
+  // Integrity protection - PCI-DSS 10.5.2
+  hash      String // SHA-256 hash of log entry
+  signature String // HMAC signature
+
+  // Immutability - logs cannot be updated
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+  @@index([result])
+  @@index([ipAddress])
+  @@map("audit_logs")
+}
+
+// API Keys for merchant integrations
+model ApiKey {
+  id       String @id @default(uuid())
+  userId   String
+  name     String
+  keyHash  String  @unique // Hashed API key (never store plaintext)
+
+  // Permissions
+  scopes      String[] // Array of allowed scopes
+
+  // Security
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  isActive    Boolean   @default(true)
+
+  // Rate limiting metadata
+  rateLimit   Int       @default(1000) // Requests per hour
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// NextAuth models
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  // Security enhancements
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  lastActivity DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sessionToken])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// Security Events - For monitoring
+model SecurityEvent {
+  id        String   @id @default(uuid())
+  type      String   // BRUTE_FORCE, SUSPICIOUS_ACTIVITY, etc.
+  severity  String   // LOW, MEDIUM, HIGH, CRITICAL
+  userId    String?
+  ipAddress String?
+  userAgent String?
+  details   Json
+  resolved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([type])
+  @@index([severity])
+  @@index([createdAt])
+  @@index([resolved])
+  @@map("security_events")
+}
